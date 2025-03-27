@@ -6,19 +6,74 @@
 
 from typing import Any
 from io import BytesIO
-from ccd2iso.clonecd import ccd_sector
 import contextlib
+import tkinter.filedialog as fileDialog
 import os
 import progressbar
-from ctypes import sizeof
+from ctypes import c_ubyte, Structure, Union, sizeof
 import sys
 
 __version__ = "0.0.1"
+DATA_SIZE = 2048
+
+#
+# Structures
+#
+
+class ccd_sectheader_header(Structure):
+    _fields_ = [
+        ('sectaddr_min', c_ubyte),
+        ('sectaddr_sec', c_ubyte),
+        ('sectaddr_frac', c_ubyte),
+        ('mode', c_ubyte),
+    ]
+
+class ccd_sectheader(Structure):
+    _fields_ = [
+        ('synchronization', c_ubyte * 12),
+        ('header', ccd_sectheader_header),
+    ]
+
+class ccd_mode1(Structure):
+    _fields_ = [
+        ('data', c_ubyte * DATA_SIZE),
+        ('edc', c_ubyte * 4),
+        ('unused', c_ubyte * 8),
+        ('ecc', c_ubyte * 276),
+    ]
+
+class ccd_mode2(Structure):
+    _fields_ = [
+        ('sectsubheader', c_ubyte * 8),  # Unknown structure
+        ('data', c_ubyte * DATA_SIZE),
+        ('edc', c_ubyte * 4),
+        ('ecc', c_ubyte * 276),
+    ]
+
+class ccd_content(Union):
+    """Represents various modes a content block could be in.
+
+    Other modes exist, such as for multisession data.
+    """
+    _fields_ = [
+        ('mode1', ccd_mode1),
+        ('mode2', ccd_mode2),
+    ]
+
+class ccd_sector(Structure):
+    """Individual sector in the disc image."""
+    _fields_ = [
+        ('sectheader', ccd_sectheader),
+        ('content', ccd_content),
+    ]
+
+#
+# Exceptions
+#
 
 class IncompleteSectorError(Exception):
     """Raised when there are less bytes in the sector than expected."""
     pass
-
 
 class SessionMarkerError(Exception):
     """Raised when a session marker is reached.
@@ -28,11 +83,13 @@ class SessionMarkerError(Exception):
     """
     pass
 
-
 class UnrecognizedSectorModeError(Exception):
     """Raised when a sector mode isn't supported by ccd2iso."""
     pass
 
+#
+# Functions
+#
 
 def convert(src_file: BytesIO, dst_file: BytesIO, progress: bool = False, size: int = None) -> None:
     """Converts a CloneCD disc image bytestream to an ISO 9660 bytestream.
@@ -71,7 +128,6 @@ def convert(src_file: BytesIO, dst_file: BytesIO, progress: bool = False, size: 
 
             if progress:
                 context.update(sect_num)
-
 
 def main():
     """Command-line interface
@@ -118,7 +174,13 @@ def main():
 
     # Check source file
     try:
-        src_file = open(args.img, 'rb')
+        # src_file = open(args.img, 'rb')
+        src_file = fileDialog.askopenfile(mode='rw', filetypes=[("CloneCD Image", "*.img")])
+        if not src_file:
+            print('Error: No file selected.')
+            sys.exit(0)
+        else:
+            src_file = src_file.buffer
     except FileNotFoundError as error:
         print("Error: Couldn't find the file", error.filename)
         sys.exit(1)
@@ -161,7 +223,6 @@ def main():
         print('The .iso file might be mounted or marked read-only.')
         print(dst_file.name, 'contains the ISO data')
     print('Done.')
-
 
 if __name__ == '__main__':
     main()
