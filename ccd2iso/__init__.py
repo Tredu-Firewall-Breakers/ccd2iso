@@ -102,10 +102,15 @@ def convert(src_file: BytesIO, dst_file: BytesIO, progress: bool = False, size: 
 
     sect_num = 0
     expected_size = sizeof(ccd_sector)
-    max_value = int(size/expected_size) if size else progressbar.UnknownLength
-    context = progressbar.ProgressBar(max_value=max_value) if progress else contextlib.nullcontext()
+    max_value = int(size / expected_size) if size else progressbar.UnknownLength
+    print(max_value, progress)
 
-    with context:
+    # Initialize progress bar if enabled
+    progress_bar = progressbar.ProgressBar(maxval=max_value) if progress else None
+    if progress_bar:
+        progress_bar.start()
+
+    try:
         while bytes_read := src_file.read(expected_size):
             src_sect = ccd_sector.from_buffer_copy(bytes_read)
             if sizeof(src_sect) < expected_size:
@@ -118,90 +123,57 @@ def convert(src_file: BytesIO, dst_file: BytesIO, progress: bool = False, size: 
             elif src_sect.sectheader.header.mode == 2:
                 bytes_written = dst_file.write(src_sect.content.mode2.data)
             elif src_sect.sectheader.header.mode == b'\xe2':
-                raise SessionMarkerError(
-                    'Error: Found a session marker, this image might contain multisession data. Only the first session was exported.')
+                raise SessionMarkerError('Error: Found a session marker, this image might contain multisession data. Only the first session was exported.')
             else:
-                raise UnrecognizedSectorModeError('Error: Unrecognized sector mode (%x) at sector %d!' %
-                                                  (src_sect.sectheader.header.mode, sect_num))
+                raise UnrecognizedSectorModeError('Error: Unrecognized sector mode (%x) at sector %d!' % (src_sect.sectheader.header.mode, sect_num))
 
             sect_num += 1
 
-            if progress:
-                context.update(sect_num)
+            # Update progress bar if enabled
+            if progress_bar:
+                progress_bar.update(sect_num)
+    finally:
+        # Finish progress bar if enabled
+        if progress_bar:
+            progress_bar.finish()
 
 def main():
-    """Command-line interface
-
-    usage: ccd2iso [-f] [-?] [-v] img [iso]
-
-    Convert CloneCD .img files to ISO 9660 .iso files.
-
-    positional arguments:
-    img             .img file to convert
-    iso             filepath for the output .iso file
-
-    optional arguments:
-    -f, --force     overwrite the .iso file if it already exists
-    -q, --quiet     don't output conversion progress
-    -v, --version   show program's version number and exit
-    -?, -h, --help  show this help message and exit
-    """
-
-    # Set up command arguments
-    import argparse
-    parser = argparse.ArgumentParser(
-        description='Convert CloneCD .img files to ISO 9660 .iso files.', add_help=False)
-    parser.add_argument('img', help='.img file to convert')
-    parser.add_argument(
-        'iso', nargs='?', help='filepath for the output .iso file')
-    parser.add_argument('-f', '--force', action='store_true',
-                        help='overwrite the .iso file if it already exists')
-    parser.add_argument('-q', '--quiet', action='store_true',
-                        help="don't output conversion progress")
-    parser.add_argument('-v', '--version', action='version',
-                        version='%(prog)s ' + __version__)
-    # Add -? alias from original ccd2iso
-    parser.add_argument('-?', '-h', '--help', action='help',
-                        help='show this help message and exit')
-
-    # Display full help menu with no arguments, instead of one-line usage
-    if len(sys.argv) == 1:
-        parser.print_help()
-        sys.exit(0)
-
-    # Parse arguments
-    args = parser.parse_args()
-
     # Check source file
-    try:
-        # src_file = open(args.img, 'rb')
-        src_file = fileDialog.askopenfile(mode='rw', filetypes=[("CloneCD Image", "*.img")])
-        if not src_file:
+    src_file = fileDialog.askopenfile(mode='r', filetypes=[("CloneCD Image", "*.img")])
+    dst_file = None
+
+    # ask for source file
+    if not src_file:
+        print('Error: No file selected.')
+        sys.exit(0)
+    else:
+        print('Source file:', src_file.name)
+
+    # ask if user wants to create a new .iso file in the same directory
+    if input('Create new .iso file in the same directory? (y/n) ').lower() == 'y':
+        import tempfile
+        # get current directory
+        current_dir = os.path.dirname(src_file.name)
+        dst_file = tempfile.NamedTemporaryFile(dir = current_dir, delete=False)
+        print('Destination file:', dst_file.name, 'Current Directory:', current_dir)
+    else:
+        # ask for destination file
+        dst_file = fileDialog.asksaveasfile(mode='wb', defaultextension='.iso', filetypes=[("ISO 9660 Image", "*.iso")])
+        if not dst_file:
             print('Error: No file selected.')
             sys.exit(0)
         else:
-            src_file = src_file.buffer
-    except FileNotFoundError as error:
-        print("Error: Couldn't find the file", error.filename)
-        sys.exit(1)
-
-    # Set up destination file
-    import tempfile
-
-    if not args.iso:
-        args.iso = os.path.splitext(args.img)[0] + '.iso'
-    if os.path.exists(args.iso) and not args.force:
-        print('Error:', args.iso,
-              'already exists, pass --force if you want to overwrite it.')
-        sys.exit(1)
-
-    dst_file = tempfile.NamedTemporaryFile(
-        dir=os.path.dirname(args.iso), delete=False)
+            print('Destination file:', dst_file.name)
 
     # Run conversion
     try:
-        convert(src_file, dst_file, progress=not args.quiet,
-                size=os.path.getsize(args.img))
+        runQuiet = input('Run in quiet mode? (y/n) ').lower()
+        if runQuiet == 'y':
+            runQuiet = True
+        else:
+            runQuiet = False
+        print('Converting...')
+        convert(src_file, dst_file, progress=not runQuiet, size = os.path.getsize(src_file.name))
     except KeyboardInterrupt:
         print('Cancelled.')
         dst_file.close()
@@ -217,9 +189,9 @@ def main():
     src_file.close()
     dst_file.close()
     try:
-        os.replace(dst_file.name, args.iso)
+        os.replace(dst_file.name, src_file.name + '.iso')
     except PermissionError:
-        print("Error: Couldn't overwrite", args.iso)
+        print("Error: Couldn't overwrite", dst_file.name, "with", src_file.name + '.iso')  
         print('The .iso file might be mounted or marked read-only.')
         print(dst_file.name, 'contains the ISO data')
     print('Done.')
